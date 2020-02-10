@@ -6,4 +6,7 @@
     (libraries
         bigarray
         Revery
+        sdl2
+        threads.posix
+        SdlAudio
     ))
