@@ -1,4 +1,13 @@
 (install
     (section bin)
     (package App)
-    (files Roboto-Regular.ttf))
+    (files
+        Roboto-Regular.ttf
+        smb_jump-small.wav
+        mario-1.png
+        mario-2.png
+        mario-3.png
+        mario-jump.png
+        mario-idle.png
+        floor-light.png
+    ))
