@@ -2,19 +2,8 @@ open Revery;
 open Revery.UI;
 open Revery.UI.Components;
 
-module AudioProvider = {
-  let%component make = (~children, ()) => {
-    let%hook () =
-      Hooks.effect(
-        OnMount,
-        () => {
-          Audio.initSound();
-          Some(Audio.endSound);
-        },
-      );
-    children;
-  };
-};
+let getPathToAsset = assetName =>
+  Environment.getExecutingDirectory() ++ assetName;
 
 module Constants = {
   let gravity = (-500.0);
@@ -24,32 +13,59 @@ module Constants = {
 
   let maxVelocityX = 200.0;
   let accelerationX = 100.0;
+
+  // rendering
+  let width = 800;
+  let floorHeight = 60;
 };
 
 let clamp = (~min, ~max, value) => {
   value < min ? min : value > max ? max : value;
 };
 
-module Assets = {
-  let frame1 = "0.gif";
-  let frame2 = "1.gif";
-  let frame3 = "2.gif";
+module Key = {
+  type t =
+    | Left
+    | Right
+    | Up
+    | Unknown;
+
+  let fromKeyEvent = (keyEvent: NodeEvents.keyEventParams) =>
+    switch (keyEvent.keycode) {
+    | v when Key.Keycode.right == v => Right
+    | v when Key.Keycode.left == v => Left
+    | 1073741906 => Up
+    | _ => Unknown
+    };
 };
 
 module State = {
-  type pressedKey =
-    | Left
-    | Right;
+  module PressedKeys = {
+    type t = list(Key.t);
 
+    let hasKey = (key, list) => list |> List.exists(k => k == key);
+
+    let addKey = (key, list) =>
+      hasKey(key, list) ? list : List.cons(key, list);
+
+    let removeKey = (key, list) => list |> List.filter(k => k != key);
+  };
   module Mario = {
+    type movement =
+      | Left(int)
+      | Right(int)
+      | Idle
+      | Jump;
+
     type t = {
       positionX: float,
       positionY: float,
       velocityY: float,
       velocityX: float,
+      movement,
     };
 
-    let minY = 30.0;
+    let minY = Constants.floorHeight |> float_of_int;
     let maxY = 200.0;
 
     let init = () => {
@@ -57,131 +73,169 @@ module State = {
       positionY: minY,
       velocityY: 0.0,
       velocityX: 0.0,
+      movement: Idle,
     };
 
     let isJumping = mario => mario.positionY > minY;
 
-    let applyGravity = (time: float, key: option(pressedKey), mario: t) => {
-      let velocityY = mario.velocityY +. Constants.gravity *. time;
-      let positionY = mario.positionY +. velocityY *. time;
+    let increaseFallingVelocity = (~positionY, ~velocityY) =>
+      positionY <= minY ? 0.0 : positionY >= maxY ? (-100.0) : velocityY;
 
+    let applyGravity = (~deltaTime, mario: t) => {
+      let nextVelocityY = mario.velocityY +. Constants.gravity *. deltaTime;
+      let nextPositionY = mario.positionY +. nextVelocityY *. deltaTime;
+
+      let positionY = clamp(~min=minY, ~max=maxY, nextPositionY);
+      let velocityY =
+        increaseFallingVelocity(~positionY, ~velocityY=nextVelocityY);
+
+      {...mario, velocityY, positionY};
+    };
+
+    let applyFriction = (~deltaTime, keys: PressedKeys.t, mario: t) => {
       let velocityX =
-        switch (key) {
-        | Some(direction) =>
-          let newVelocity =
-            switch (direction) {
-            | Left => mario.velocityX -. Constants.accelerationX
-            | Right => mario.velocityX +. Constants.accelerationX
-            };
-          clamp(
-            ~min=(-1.0) *. Constants.maxVelocityX,
-            ~max=Constants.maxVelocityX,
-            newVelocity,
-          );
+        (
+          switch (
+            PressedKeys.hasKey(Key.Left, keys),
+            PressedKeys.hasKey(Key.Right, keys),
+          ) {
+          | (true, false) => mario.velocityX -. Constants.accelerationX
+          | (false, true) => mario.velocityX +. Constants.accelerationX
+          | _ => mario.velocityX *. Constants.friction
+          }
+        )
+        |> clamp(
+             ~min=(-1.0) *. Constants.maxVelocityX,
+             ~max=Constants.maxVelocityX,
+           );
 
-        | None => mario.velocityX *. Constants.friction
-        };
+      let positionX = mario.positionX +. velocityX *. deltaTime;
+      {...mario, positionX, velocityX};
+    };
 
-      let positionX = mario.positionX +. velocityX *. time;
+    let keysToMovement = (time, keys: PressedKeys.t) => {
+      let frameFromTime = int_of_float(time *. 6.) mod 3;
 
-      {
-        velocityX,
-        positionX,
-        positionY: clamp(~min=minY, ~max=maxY, positionY),
-        velocityY:
-          positionY < minY ? 0.0 : positionY > maxY ? (-100.0) : velocityY,
+      if (keys |> PressedKeys.hasKey(Key.Left)) {
+        Left(frameFromTime);
+      } else if (keys |> PressedKeys.hasKey(Key.Right)) {
+        Right(frameFromTime);
+      } else {
+        Idle;
       };
     };
+
+    let updateMovement = (~time, keys: PressedKeys.t, mario: t) => {
+      let movement = isJumping(mario) ? Jump : keysToMovement(time, keys);
+      {...mario, movement};
+    };
+
+    let step = (~time, ~deltaTime, keys: list(Key.t), mario: t) =>
+      mario
+      |> applyGravity(~deltaTime)
+      |> applyFriction(~deltaTime, keys)
+      |> updateMovement(~time, keys);
 
     let jump = (mario: t) => {
       ...mario,
       velocityY: isJumping(mario) ? mario.velocityY : Constants.velocityY,
     };
   };
+
+  type state = {
+    mario: Mario.t,
+    pressedKeys: list(Key.t),
+    time: float,
+  };
+
+  let init = () => {mario: Mario.init(), time: 0., pressedKeys: []};
+
+  type action =
+    | KeyDown(Key.t)
+    | KeyUp(Key.t)
+    | Step(float);
+
+  let shouldJump = (key, pressedKeys) =>
+    key == Key.Up && !PressedKeys.hasKey(Key.Up, pressedKeys);
+
+  let reducer = (action, state) =>
+    switch (action) {
+    | KeyDown(key) =>
+      let mario =
+        shouldJump(key, state.pressedKeys)
+          ? Mario.jump(state.mario) : state.mario;
+
+      let pressedKeys = PressedKeys.addKey(key, state.pressedKeys);
+      {...state, pressedKeys, mario};
+    | KeyUp(key) => {
+        ...state,
+        pressedKeys: PressedKeys.removeKey(key, state.pressedKeys),
+      }
+
+    | Step(deltaTime) =>
+      let time = state.time +. deltaTime;
+      let mario =
+        Mario.step(~deltaTime, ~time, state.pressedKeys, state.mario);
+
+      {...state, time, mario};
+    };
 };
 
 module Mario = {
-  let gif = "mario.gif";
+  open Assets.Mario;
 
-  let make = (~left, ~bottom, ()) => {
-    <Positioned bottom left>
-      <Image src=gif width=100 height=100 />
+  let image = (~movement: State.Mario.movement, ()) => {
+    let (src, height, width) =
+      switch (movement) {
+      | Left(ind)
+      | Right(ind) =>
+        let image =
+          switch (ind) {
+          | 0 => Moving.image1
+          | 1 => Moving.image2
+          | 2 => Moving.image3
+          | _ => Moving.image1
+          };
+        (image, Moving.height, Moving.width);
+      | Idle => (Idle.image, Idle.height, Idle.width)
+      | Jump => (Jump.image, Jump.height, Jump.width)
+      };
+
+    <Image src={getPathToAsset(src)} width height />;
+  };
+
+  let make = (~mario: State.Mario.t, ()) => {
+    <Positioned
+      left={mario.positionX |> int_of_float}
+      bottom={mario.positionY |> int_of_float}>
+      <image movement={mario.movement} />
     </Positioned>;
   };
 };
 
-type audioState =
-  | Playing
-  | Paused
-  | NotStarted;
-
-type state = {
-  audioState,
-  mario: State.Mario.t,
-  pressedKey: option(State.pressedKey),
+let floor = () => {
+  <Positioned bottom=0 left=0>
+    <Stack width=Constants.width height=Constants.floorHeight>
+      <Image
+        src=Assets.Floor.image
+        width=Constants.width
+        height=Assets.Floor.height
+        resizeMode=ImageResizeMode.Repeat
+      />
+      <Image
+        src=Assets.Floor.image
+        width=Constants.width
+        height=Assets.Floor.height
+        resizeMode=ImageResizeMode.Repeat
+      />
+    </Stack>
+  </Positioned>;
 };
 
-type action =
-  | Toggle
-  | KeyDown(State.pressedKey)
-  | KeyUp
-  | Step(float)
-  | Jump;
-
-let reducer = (action, state) =>
-  switch (action) {
-  | Toggle =>
-    let audioState =
-      switch (state.audioState) {
-      | Playing => Paused
-      | Paused => Playing
-      | NotStarted => Playing
-      };
-    {...state, audioState};
-  | KeyDown(key) => {...state, pressedKey: Some(key)}
-  | KeyUp => {...state, pressedKey: None}
-  | Jump => {...state, mario: State.Mario.jump(state.mario)}
-  | Step(time) => {
-      ...state,
-      mario: State.Mario.applyGravity(time, state.pressedKey, state.mario),
-    }
-  };
-
-module SimpleButton = {
-  let make = (~onClick, ~text, ()) => {
-    let wrapperStyle =
-      Style.[
-        backgroundColor(Color.rgba(1., 1., 1., 0.1)),
-        border(~width=2, ~color=Colors.white),
-        margin(16),
-      ];
-
-    let textHeaderStyle =
-      Style.[
-        color(Colors.white),
-        fontFamily("Roboto-Regular.ttf"),
-        fontSize(20),
-      ];
-
-    <Clickable onClick>
-      <View style=wrapperStyle>
-        <Padding padding=4> <Text style=textHeaderStyle text /> </Padding>
-      </View>
-    </Clickable>;
-  };
-};
-
-module MusicPlayer = {
+module World = {
   let%component make = () => {
     let%hook (state, dispatch) =
-      Hooks.reducer(
-        ~initialState={
-          audioState: NotStarted,
-          mario: State.Mario.init(),
-          pressedKey: None,
-        },
-        reducer,
-      );
+      Hooks.reducer(~initialState=State.init(), State.reducer);
 
     let%hook () =
       Hooks.tick(~tickRate=Time.zero, t =>
@@ -204,50 +258,25 @@ module MusicPlayer = {
         //Audio.playMusic(30.0, "mario.wav") |> ignore;
         None
       });
-    // Revery_UI.NodeEvents.keyEventParams
+
     <Clickable
       style=containerStyle
-      onKeyUp={_ => dispatch(KeyUp)}
-      onKeyDown={key => {
-        if (key.keycode == Key.Keycode.right) {
-          dispatch(KeyDown(Right));
+      onKeyUp={event => State.KeyUp(event |> Key.fromKeyEvent) |> dispatch}
+      onKeyDown={(event: NodeEvents.keyEventParams) => {
+        let key = Key.fromKeyEvent(event);
+        switch (key) {
+        | Up =>
+          if (!State.PressedKeys.hasKey(Key.Up, state.pressedKeys)) {
+            Audio.playSound(30.0, getPathToAsset("smb_jump-small.wav"));
+            ignore();
+          }
+        | _ => ignore()
         };
-        if (key.keycode == 1073741906) {
-          Audio.playSound(30.0, "smb_jump-small.wav") |> ignore;
-          dispatch(Jump);
-        };
-        if (key.keycode == Key.Keycode.left) {
-          dispatch(KeyDown(Left));
-        };
+        dispatch(KeyDown(key));
       }}>
-      // switch (key.keycode) {
-      // | (Key.Keycode.right) =>
-      // | _ => ignore()
-      // }
-
-        <Mario
-          left={state.mario.positionX |> int_of_float}
-          bottom={state.mario.positionY |> int_of_float}
-        />
-      </Clickable>;
-    // <SimpleButton
-    //   onClick={() => {
-    //     Audio.playSound(30.0, "Checkie_Brown-Susie_the_Cat.wav") |> ignore;
-    //     dispatch(Toggle);
-    //   }}
-    //   text="Play"
-    // />
-    // <SimpleButton
-    //   onClick={() => {
-    //     switch (state.audioState) {
-    //     | Playing => Audio.pauseSound()
-    //     | Paused => Audio.resumeSound()
-    //     | _ => ignore()
-    //     };
-    //     dispatch(Toggle);
-    //   }}
-    //   text="Resume/Pause"
-    // />
+      <floor />
+      <Mario mario={state.mario} />
+    </Clickable>;
   };
 };
 
@@ -256,20 +285,7 @@ let init = app => {
 
   let win = App.createWindow(app, "Welcome to Revery!");
 
-  let containerStyle =
-    Style.[
-      position(`Absolute),
-      justifyContent(`Center),
-      alignItems(`Center),
-      bottom(0),
-      top(0),
-      left(0),
-      right(0),
-    ];
-
-  let innerStyle = Style.[flexDirection(`Row), alignItems(`FlexEnd)];
-
-  let element = <AudioProvider> <MusicPlayer /> </AudioProvider>;
+  let element = <AudioProvider> <World /> </AudioProvider>;
 
   let _ = UI.start(win, element);
   ();
