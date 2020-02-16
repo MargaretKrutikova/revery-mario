@@ -39,21 +39,24 @@ module Key = {
     };
 };
 
+module PressedKeys = {
+  type t = list(Key.t);
+  let hasKey = (key, list) => list |> List.exists(k => k == key);
+  let addKey = (key, list) =>
+    hasKey(key, list) ? list : List.cons(key, list);
+  let removeKey = (key, list) => list |> List.filter(k => k != key);
+};
+
+module Direction = {
+  type t =
+    | Left
+    | Right;
+};
+
 module State = {
-  module PressedKeys = {
-    type t = list(Key.t);
-
-    let hasKey = (key, list) => list |> List.exists(k => k == key);
-
-    let addKey = (key, list) =>
-      hasKey(key, list) ? list : List.cons(key, list);
-
-    let removeKey = (key, list) => list |> List.filter(k => k != key);
-  };
   module Mario = {
     type movement =
-      | Left(int)
-      | Right(int)
+      | Run(int)
       | Idle
       | Jump;
 
@@ -63,6 +66,7 @@ module State = {
       velocityY: float,
       velocityX: float,
       movement,
+      direction: Direction.t,
     };
 
     let minY = Constants.floorHeight |> float_of_int;
@@ -74,9 +78,24 @@ module State = {
       velocityY: 0.0,
       velocityX: 0.0,
       movement: Idle,
+      direction: Right,
     };
 
     let isJumping = mario => mario.positionY > minY;
+
+    let isRunning = keys =>
+      PressedKeys.hasKey(Key.Left, keys)
+      || PressedKeys.hasKey(Key.Right, keys);
+
+    let getDirectionFromKeys = pressedKeys =>
+      switch (
+        PressedKeys.hasKey(Key.Left, pressedKeys),
+        PressedKeys.hasKey(Key.Right, pressedKeys),
+      ) {
+      | (true, false) => Some(Direction.Left)
+      | (false, true) => Some(Right)
+      | _ => None
+      };
 
     let increaseFallingVelocity = (~positionY, ~velocityY) =>
       positionY <= minY ? 0.0 : positionY >= maxY ? (-100.0) : velocityY;
@@ -95,12 +114,9 @@ module State = {
     let applyFriction = (~deltaTime, keys: PressedKeys.t, mario: t) => {
       let velocityX =
         (
-          switch (
-            PressedKeys.hasKey(Key.Left, keys),
-            PressedKeys.hasKey(Key.Right, keys),
-          ) {
-          | (true, false) => mario.velocityX -. Constants.accelerationX
-          | (false, true) => mario.velocityX +. Constants.accelerationX
+          switch (getDirectionFromKeys(keys)) {
+          | Some(Direction.Left) => mario.velocityX -. Constants.accelerationX
+          | Some(Right) => mario.velocityX +. Constants.accelerationX
           | _ => mario.velocityX *. Constants.friction
           }
         )
@@ -113,28 +129,35 @@ module State = {
       {...mario, positionX, velocityX};
     };
 
-    let keysToMovement = (time, keys: PressedKeys.t) => {
-      let frameFromTime = int_of_float(time *. 6.) mod 3;
-
-      if (keys |> PressedKeys.hasKey(Key.Left)) {
-        Left(frameFromTime);
-      } else if (keys |> PressedKeys.hasKey(Key.Right)) {
-        Right(frameFromTime);
-      } else {
-        Idle;
-      };
-    };
-
     let updateMovement = (~time, keys: PressedKeys.t, mario: t) => {
-      let movement = isJumping(mario) ? Jump : keysToMovement(time, keys);
+      let movement =
+        switch (isJumping(mario), isRunning(keys)) {
+        | (true, _) => Jump
+        | (false, true) =>
+          let frameFromTime = int_of_float(time *. 6.) mod 3;
+          Run(frameFromTime);
+        | _ => Idle
+        };
+
       {...mario, movement};
     };
 
-    let step = (~time, ~deltaTime, keys: list(Key.t), mario: t) =>
+    let updateDirection = (keys: PressedKeys.t, mario: t) => {
+      let direction =
+        switch (getDirectionFromKeys(keys)) {
+        | Some(dir) => dir
+        | None => mario.direction
+        };
+
+      {...mario, direction};
+    };
+
+    let step = (~time, ~deltaTime, keys: PressedKeys.t, mario: t) =>
       mario
       |> applyGravity(~deltaTime)
       |> applyFriction(~deltaTime, keys)
-      |> updateMovement(~time, keys);
+      |> updateMovement(~time, keys)
+      |> updateDirection(keys);
 
     let jump = (mario: t) => {
       ...mario,
@@ -144,7 +167,7 @@ module State = {
 
   type state = {
     mario: Mario.t,
-    pressedKeys: list(Key.t),
+    pressedKeys: PressedKeys.t,
     time: float,
   };
 
@@ -158,6 +181,13 @@ module State = {
   let shouldJump = (key, pressedKeys) =>
     key == Key.Up && !PressedKeys.hasKey(Key.Up, pressedKeys);
 
+  let removeOppositeDirectionKey = (key, list) =>
+    switch (key) {
+    | Key.Left => PressedKeys.removeKey(Key.Right, list)
+    | Right => PressedKeys.removeKey(Key.Left, list)
+    | _ => list
+    };
+
   let reducer = (action, state) =>
     switch (action) {
     | KeyDown(key) =>
@@ -165,7 +195,11 @@ module State = {
         shouldJump(key, state.pressedKeys)
           ? Mario.jump(state.mario) : state.mario;
 
-      let pressedKeys = PressedKeys.addKey(key, state.pressedKeys);
+      let pressedKeys =
+        state.pressedKeys
+        |> PressedKeys.addKey(key)
+        |> removeOppositeDirectionKey(key);
+
       {...state, pressedKeys, mario};
     | KeyUp(key) => {
         ...state,
@@ -184,11 +218,10 @@ module State = {
 module Mario = {
   open Assets.Mario;
 
-  let image = (~movement: State.Mario.movement, ()) => {
+  let image = (~mario: State.Mario.t, ()) => {
     let (src, height, width) =
-      switch (movement) {
-      | Left(ind)
-      | Right(ind) =>
+      switch (mario.movement) {
+      | Run(ind) =>
         let image =
           switch (ind) {
           | 0 => Moving.image1
@@ -200,15 +233,25 @@ module Mario = {
       | Idle => (Idle.image, Idle.height, Idle.width)
       | Jump => (Jump.image, Jump.height, Jump.width)
       };
-
-    <Image src={getPathToAsset(src)} width height />;
+    let style =
+      switch (mario.direction) {
+      | Left =>
+        Style.[
+          transform([
+            Transform.ScaleX(-1.0),
+            Transform.TranslateX(- Moving.width |> float_of_int),
+          ]),
+        ]
+      | _ => Style.[]
+      };
+    <Image src={getPathToAsset(src)} width height style />;
   };
 
   let make = (~mario: State.Mario.t, ()) => {
     <Positioned
       left={mario.positionX |> int_of_float}
       bottom={mario.positionY |> int_of_float}>
-      <image movement={mario.movement} />
+      <image mario />
     </Positioned>;
   };
 };
@@ -230,6 +273,14 @@ let floor = () => {
       />
     </Stack>
   </Positioned>;
+};
+
+module SoundHandler = {
+  let bgSound = "SuperMarioBros.wav" |> getPathToAsset;
+  let jumpSound = "smb_jump-small.wav" |> getPathToAsset;
+
+  let playBackgroundSound = () => Audio.playMusic(10.0, bgSound) |> ignore;
+  let playJumpSound = () => Audio.playSound(30.0, jumpSound) |> ignore;
 };
 
 module World = {
@@ -254,23 +305,22 @@ module World = {
       ];
 
     let%hook () =
-      Hooks.effect(OnMount, () => {
-        //Audio.playMusic(30.0, "mario.wav") |> ignore;
-        None
-      });
+      Hooks.effect(
+        OnMount,
+        () => {
+          SoundHandler.playBackgroundSound();
+          None;
+        },
+      );
 
     <Clickable
       style=containerStyle
       onKeyUp={event => State.KeyUp(event |> Key.fromKeyEvent) |> dispatch}
       onKeyDown={(event: NodeEvents.keyEventParams) => {
         let key = Key.fromKeyEvent(event);
-        switch (key) {
-        | Up =>
-          if (!State.PressedKeys.hasKey(Key.Up, state.pressedKeys)) {
-            Audio.playSound(30.0, getPathToAsset("smb_jump-small.wav"));
-            ignore();
-          }
-        | _ => ignore()
+        // TODO: refactor into shouldPlaySound
+        if (key == Up && !PressedKeys.hasKey(Key.Up, state.pressedKeys)) {
+          SoundHandler.playJumpSound();
         };
         dispatch(KeyDown(key));
       }}>
@@ -288,6 +338,7 @@ let init = app => {
   let element = <AudioProvider> <World /> </AudioProvider>;
 
   let _ = UI.start(win, element);
+
   ();
 };
 
