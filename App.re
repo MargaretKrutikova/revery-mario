@@ -1,6 +1,7 @@
 open Revery;
 open Revery.UI;
 open Revery.UI.Components;
+open Revery.Math;
 
 let getPathToAsset = assetName =>
   Environment.getExecutingDirectory() ++ assetName;
@@ -53,6 +54,11 @@ module Key = {
     };
 };
 
+let isSome =
+  fun
+  | None => false
+  | Some(_) => true;
+
 module PressedKeys = {
   type t = list(Key.t);
   let hasKey = (key, list) => list |> List.exists(k => k == key);
@@ -62,12 +68,21 @@ module PressedKeys = {
 };
 
 module Direction = {
-  type t =
-    | Left
-    | Right;
+  type t = [ | `Left | `Right];
 };
 
 module State = {
+  module Pipe = {
+    type t = {box: BoundingBox2d.t};
+
+    let make = (~x, ~height) => {
+      let width = Assets.Pipe.width |> float_of_int;
+      let y = Constants.floorHeight |> float_of_int;
+
+      {box: Collision.createBoundingBox(~x, ~y, ~height, ~width)};
+    };
+  };
+
   module Mario = {
     type movement =
       | Run(int)
@@ -84,7 +99,7 @@ module State = {
     };
 
     let minY = Constants.floorHeight |> float_of_int;
-    let maxY = 200.0;
+    let maxY = 300.0;
 
     let init = () => {
       positionX: 30.0,
@@ -92,7 +107,34 @@ module State = {
       velocityY: 0.0,
       velocityX: 0.0,
       movement: Idle,
-      direction: Right,
+      direction: `Right,
+    };
+
+    let getRectangle = (mario: t) => {
+      let x = mario.positionX;
+      let y = mario.positionY;
+      let width = Assets.Mario.Idle.width |> float_of_int;
+      let height = Assets.Mario.Idle.height |> float_of_int;
+
+      Collision.createBoundingBox(~x, ~y, ~width, ~height);
+    };
+
+    let getCollisionDirection =
+        (mario, pipes): option(Collision.collisionDirection) => {
+      let collision =
+        pipes
+        |> List.map((pipe: Pipe.t) =>
+             Collision.collides(
+               ~entityBox=getRectangle(mario),
+               ~contactBox=pipe.box,
+             )
+           )
+        |> List.find_opt(isSome);
+
+      switch (collision) {
+      | Some(Some(col)) => Some(col)
+      | _ => None
+      };
     };
 
     let isJumping = mario => mario.positionY > minY;
@@ -106,31 +148,35 @@ module State = {
         PressedKeys.hasKey(Key.Left, pressedKeys),
         PressedKeys.hasKey(Key.Right, pressedKeys),
       ) {
-      | (true, false) => Some(Direction.Left)
-      | (false, true) => Some(Right)
+      | (true, false) => Some(`Left)
+      | (false, true) => Some(`Right)
       | _ => None
       };
-
-    let increaseFallingVelocity = (~positionY, ~velocityY) =>
-      positionY <= minY ? 0.0 : positionY >= maxY ? (-100.0) : velocityY;
 
     let applyGravity = (~deltaTime, mario: t) => {
       let nextVelocityY = mario.velocityY +. Constants.gravity *. deltaTime;
       let nextPositionY = mario.positionY +. nextVelocityY *. deltaTime;
 
-      let positionY = clamp(~min=minY, ~max=maxY, nextPositionY);
-      let velocityY =
-        increaseFallingVelocity(~positionY, ~velocityY=nextVelocityY);
+      let positionY = nextPositionY < minY ? minY : nextPositionY;
+      let velocityY = nextVelocityY;
 
       {...mario, velocityY, positionY};
     };
 
-    let applyFriction = (~deltaTime, keys: PressedKeys.t, mario: t) => {
+    let applyFriction =
+        (
+          ~deltaTime,
+          ~collision: option(Collision.collisionDirection),
+          keys: PressedKeys.t,
+          mario: t,
+        ) => {
       let velocityX =
         (
-          switch (getDirectionFromKeys(keys)) {
-          | Some(Direction.Left) => mario.velocityX -. Constants.accelerationX
-          | Some(Right) => mario.velocityX +. Constants.accelerationX
+          switch (getDirectionFromKeys(keys), collision) {
+          | (Some(movingDirection), Some(colDirection))
+              when movingDirection == colDirection => 0.0
+          | (Some(`Left), _) => mario.velocityX -. Constants.accelerationX
+          | (Some(`Right), _) => mario.velocityX +. Constants.accelerationX
           | _ => mario.velocityX *. Constants.friction
           }
         )
@@ -166,12 +212,14 @@ module State = {
       {...mario, direction};
     };
 
-    let step = (~time, ~deltaTime, keys: PressedKeys.t, mario: t) =>
+    let step = (~time, ~deltaTime, pipes, keys: PressedKeys.t, mario: t) => {
+      let collision = getCollisionDirection(mario, pipes);
       mario
       |> applyGravity(~deltaTime)
-      |> applyFriction(~deltaTime, keys)
+      |> applyFriction(~deltaTime, ~collision, keys)
       |> updateMovement(~time, keys)
       |> updateDirection(keys);
+    };
 
     let jump = (mario: t) => {
       ...mario,
@@ -181,15 +229,25 @@ module State = {
 
   type state = {
     mario: Mario.t,
+    pipes: list(Pipe.t),
     pressedKeys: PressedKeys.t,
     time: float,
   };
 
-  let init = () => {mario: Mario.init(), time: 0., pressedKeys: []};
+  let init = () => {
+    mario: Mario.init(),
+    time: 0.,
+    pressedKeys: [],
+    pipes: [
+      Pipe.make(~x=500.0, ~height=80.0),
+      Pipe.make(~x=300.0, ~height=160.0),
+    ],
+  };
 
   type action =
     | KeyDown(Key.t)
     | KeyUp(Key.t)
+    // | CreatePipe()
     | Step(float);
 
   let shouldJump = (key, pressedKeys) =>
@@ -223,7 +281,13 @@ module State = {
     | Step(deltaTime) =>
       let time = state.time +. deltaTime;
       let mario =
-        Mario.step(~deltaTime, ~time, state.pressedKeys, state.mario);
+        Mario.step(
+          ~deltaTime,
+          ~time,
+          state.pipes,
+          state.pressedKeys,
+          state.mario,
+        );
 
       {...state, time, mario};
     };
@@ -249,7 +313,7 @@ module Mario = {
       };
     let style =
       switch (mario.direction) {
-      | Left =>
+      | `Left =>
         Style.[
           transform([
             Transform.ScaleX(-1.0),
@@ -289,12 +353,31 @@ let floor = () => {
   </Positioned>;
 };
 
+module Pipe = {
+  let make = (~pipe: State.Pipe.t, ()) => {
+    let (minX, minY, maxX, maxY) = BoundingBox2d.getBounds(pipe.box);
+
+    let height = maxY -. minY |> int_of_float;
+    let bottom = height - Assets.Pipe.height + Constants.floorHeight;
+
+    let left = minX |> int_of_float;
+
+    <Positioned bottom left>
+      <Image
+        src=Assets.Pipe.image
+        width=Assets.Pipe.width
+        height=Assets.Pipe.height
+      />
+    </Positioned>;
+  };
+};
+
 module SoundHandler = {
   let bgSound = "SuperMarioBros.wav" |> getPathToAsset;
   let jumpSound = "smb_jump-small.wav" |> getPathToAsset;
 
-  let playBackgroundSound = () => Audio.playMusic(10.0, bgSound) |> ignore;
-  let playJumpSound = () => Audio.playSound(30.0, jumpSound) |> ignore;
+  let playBackgroundSound = () => Audio.playMusic(0.4, bgSound) |> ignore;
+  let playJumpSound = () => Audio.playSound(1.0, jumpSound) |> ignore;
 };
 
 module World = {
@@ -333,11 +416,16 @@ module World = {
       onKeyDown={(event: NodeEvents.keyEventParams) => {
         let key = Key.fromKeyEvent(event);
         // TODO: refactor into shouldPlaySound
-        if (key == Up && !PressedKeys.hasKey(Key.Up, state.pressedKeys)) {
+        if (key == Up
+            && !PressedKeys.hasKey(Key.Up, state.pressedKeys)
+            && !State.Mario.isJumping(state.mario)) {
           SoundHandler.playJumpSound();
         };
         dispatch(KeyDown(key));
       }}>
+      {state.pipes
+       |> List.map((pipe: State.Pipe.t) => <Pipe pipe />)
+       |> React.listToElement}
       <floor />
       <Mario mario={state.mario} />
     </Clickable>;

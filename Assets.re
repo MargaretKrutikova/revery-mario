@@ -3,6 +3,14 @@ module Floor = {
   let height = 30;
   let width = 30;
 };
+// 271 / 411
+// w / h
+// 80 /
+module Pipe = {
+  let image = "pipe2.png";
+  let width = 80;
+  let height = 167; // (569.0 /. 271.0 |> int_of_float) * width;
+};
 
 module Mario = {
   module Moving = {
