@@ -5,9 +5,23 @@ open Revery.UI.Components;
 let getPathToAsset = assetName =>
   Environment.getExecutingDirectory() ++ assetName;
 
+module Physics = {
+  // g = 2 * H / t ^ 2
+  let calcGravity = (~h, ~t) => (-2.0) *. h /. t ** 2.0;
+
+  // V = 2 * H / t
+  let calcJumpVelocity = (~h, ~t) => 2.0 *. h /. t;
+};
+
 module Constants = {
-  let gravity = (-500.0);
-  let velocityY = 500.;
+  // jump
+  let jumpHeight = 200.0;
+  let jumpDuration = 0.6;
+
+  let gravity = Physics.calcGravity(~h=jumpHeight, ~t=jumpDuration);
+  let velocityY = Physics.calcJumpVelocity(~h=jumpHeight, ~t=jumpDuration);
+
+  // walk / run
   let velocityX = 20.0;
   let friction = 0.8;
 
