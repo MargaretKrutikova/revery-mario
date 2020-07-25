@@ -1,6 +1,8 @@
 [![Build Status](https://dev.azure.com/revery-ui/revery/_apis/build/status/revery-ui.revery-quick-start?branchName=master)](https://dev.azure.com/revery-ui/revery/_build/latest?definitionId=4?branchName=master)
 
-# revery-quick-start
+# Revery mario
+
+A WIP implementation of mario in `revery`. To be continued 🙂
 
 ---
 
